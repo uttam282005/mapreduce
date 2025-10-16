@@ -60,6 +60,7 @@ func(c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
 	return nil
 }
 
+// RegisterWorker RPC handler for worker registration.
 func(c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
