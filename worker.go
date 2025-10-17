@@ -23,12 +23,13 @@ type Worker struct {
 	WorkerID string
 }
 
-type GetJobArgs struct{}
+type GetJobArgs struct{
+	WorkerID string
+}
 
 type GetJobReply struct {
 	FileName string
-	JobID    int
-	NReduce  int
+	JobID   string 
 	Type     string
 }
 
@@ -70,7 +71,7 @@ func (w *Worker) Register() error {
 func handleMapJob(
 	fileName string,
 	mapf func(string, string) []KeyValue,
-	mapTaskID int,
+	mapTaskID string,
 	nReduce int,
 ) bool {
 	inputFile, err := os.Open(fileName)
@@ -110,7 +111,7 @@ func handleMapJob(
 }
 
 // Notify the coordinator that the job is done
-func notifyCoordinatorDone(JobID int) {
+func notifyCoordinatorDone(JobID string) {
 	for {
 		args := JobDoneArgs{
 			JobID,

@@ -11,9 +11,11 @@ import (
 )
 
 type Job struct {
-	JobID    int
-	Type     string
-	FileName string
+	JobID      string 
+	Type       string
+	FileName   string
+	StartTime  int64 
+	State      string
 }
 
 type MetaData struct {
@@ -24,8 +26,10 @@ type MetaData struct {
 type Coordinator struct {
 	mu sync.Mutex
 
-	Jobs  []Job
-	Workers []Worker
+	Jobs  []*Job
+	Workers []*Worker
+	Record  map[string]string
+	Status map[string]string
 	phase string
 
 	NReduce int
@@ -35,15 +39,18 @@ type Coordinator struct {
 // file 
 // id 
 // create jobs from input filess
-func(c *Coordinator) createJobs(files []string) []Job {
-	var jobs []Job
+func(c *Coordinator) createJobs(files []string) []*Job {
+	var jobs []*Job
 	for i, file := range files {
 		job := Job {
-			i,
+			string(i),
 			c.phase,
 			file,
+		-1,
+			"idle",
 		}
-		jobs = append(jobs, job)
+
+		jobs = append(jobs, &job)
 	}
 	return jobs
 }
@@ -55,9 +62,41 @@ type RegisterWorkerArgs struct {
 type RegisterWorkerReply struct {
 }
 
+type JobCompleteArgs struct {
+	JobID string
+}
+
+type JobCompleteReply struct {
+
+}
+
 // GetJob RPC handlers for the worker to call.
 func(c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	workerID := args.WorkerID
+	for _, job := range c.Jobs {
+		if  c.Status[job.JobID] == "idle" {
+			c.Record[job.JobID] = workerID
+			c.Status[job.JobID] = "inprogress"
+
+			reply.FileName = job.FileName
+			reply.JobID = job.JobID
+			reply.Type = c.phase
+
+			return nil
+		}
+	}
 	return nil
+}
+
+func (c *Coordinator) ReportJobDone(args *JobCompleteArgs, reply *JobCompleteReply) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.Record, args.JobID)
+	c.Status[args.JobID] = "done"
 }
 
 // RegisterWorker RPC handler for worker registration.
@@ -69,7 +108,7 @@ func(c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWor
 		args.WorkerID,
 	}
 
-	c.Workers = append(c.Workers, worker)
+	c.Workers = append(c.Workers, &worker)
 	return nil
 }
 
@@ -90,9 +129,9 @@ func (c *Coordinator) server() {
 // Done is called periodically by the client to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-	// Your code here.
-	return ret
+	done:= false
+
+	return done 
 }
 
 // MakeCoordinator creates a Coordinator.
