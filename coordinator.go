@@ -43,7 +43,7 @@ func (c *Coordinator) createJobs(files []string) []*Job {
 	var jobs []*Job
 	for i, file := range files {
 		job := Job{
-			string(i),
+			fmt.Sprintf("job-%d", i),
 			c.phase,
 			file,
 			-1,

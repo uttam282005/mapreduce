@@ -92,7 +92,7 @@ func handleMapJob(
 	enc := make([]*json.Encoder, nReduce)
 
 	for r := range nReduce {
-		intermediateFile := fmt.Sprintf("mr-%d-%d", mapTaskID, r)
+		intermediateFile := fmt.Sprintf("mr-%v-%d", mapTaskID, r)
 		f, err := os.Create(intermediateFile)
 		if err != nil {
 			log.Fatalf("cannot create intermediate file %v", intermediateFile)
