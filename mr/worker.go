@@ -93,7 +93,7 @@ func notifyCoordinatorDone(JobID string) {
 			JobID,
 		}
 		reply := JobDoneReply{}
-		ok := call("Coordinator.Done", &args, &reply)
+		ok := call("Coordinator.ReportJobDone", &args, &reply)
 		if !ok {
 			time.Sleep(2 * time.Second)
 			continue
@@ -222,7 +222,7 @@ func(w *Worker) StartWorker(
 
 // Send an RPC request to the coordinator, wait for the response.
 func call(rpcname string, args any, reply any) bool {
-	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	c, err := rpc.Dial("tcp", "localhost:1234")
 	if err != nil {
 		log.Fatal("failed to connect  to the coordinator.")
 	}

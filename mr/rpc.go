@@ -42,6 +42,7 @@ type MetaData struct {
 	Nmap    int
 }
 
+// Coordinator struct to hold the state of the coordinator
 type Coordinator struct {
 	mu sync.Mutex
 
@@ -70,18 +71,3 @@ type GetMetaDataReply struct {
 }
 
 type RegisterWorkerReply struct{}
-
-type JobCompleteArgs struct {
-	JobID string
-}
-
-type JobCompleteReply struct{}
-
-
-// Add your RPC definitions here.
-
-
-// Cook up a unique-ish UNIX-domain socket name
-// in /var/tmp, for the coordinator.
-// Can't use the current directory since
-// Athena AFS doesn't support UNIX-domain sockets.

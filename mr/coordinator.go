@@ -128,7 +128,7 @@ func (c *Coordinator) GetMetaData(args *GetMetaDataArgs, reply *GetMetaDataReply
 }
 
 // ReportJobDone RPC handler for worker to report job completion.
-func (c *Coordinator) ReportJobDone(args *JobCompleteArgs, reply *JobCompleteReply) {
+func (c *Coordinator) ReportJobDone(args *JobDoneArgs, reply *JobDoneReply) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -185,7 +185,12 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		Nmap: 	len(files),
+	  Status: make(map[string]string),
+		Record: make(map[string]string),
+		phase:  "map",
 		Nreduce: nReduce,
+
+		jobDone: false,
 	}
 
 	c.Jobs = c.createJobs(files)
