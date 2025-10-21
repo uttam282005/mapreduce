@@ -8,14 +8,14 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Job struct {
-	JobID      string 
-	Type       string
-	FileName   string
-	StartTime  int64 
-	State      string
+	JobID     string
+	Type      string
+	FileName  string
+	StartTime int64
 }
 
 type MetaData struct {
@@ -26,28 +26,29 @@ type MetaData struct {
 type Coordinator struct {
 	mu sync.Mutex
 
-	Jobs  []*Job
+	Jobs    []*Job
 	Workers []*Worker
 	Record  map[string]string
-	Status map[string]string
-	phase string
+	Status  map[string]string
+	phase   string
 
 	NReduce int
 	Nmap    int
+	jobDone bool
 }
-// map job 
-// file 
-// id 
+
+// map job
+// file
+// id
 // create jobs from input filess
-func(c *Coordinator) createJobs(files []string) []*Job {
+func (c *Coordinator) createJobs(files []string) []*Job {
 	var jobs []*Job
 	for i, file := range files {
-		job := Job {
+		job := Job{
 			string(i),
 			c.phase,
 			file,
-		-1,
-			"idle",
+			-1,
 		}
 
 		jobs = append(jobs, &job)
@@ -56,38 +57,83 @@ func(c *Coordinator) createJobs(files []string) []*Job {
 }
 
 type RegisterWorkerArgs struct {
-	WorkerID string 
+	WorkerID string
 }
 
-type RegisterWorkerReply struct {
-}
+type RegisterWorkerReply struct{}
 
 type JobCompleteArgs struct {
 	JobID string
 }
 
-type JobCompleteReply struct {
+type JobCompleteReply struct{}
 
-}
-
-// GetJob RPC handlers for the worker to call.
-func(c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
+func (c *Coordinator) assign(jobID, workerID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	workerID := args.WorkerID
+	c.Record[jobID] = workerID
+	c.Status[jobID] = "inprogress"
+}
+
+func (c *Coordinator) getIdleTask() *Job {
 	for _, job := range c.Jobs {
-		if  c.Status[job.JobID] == "idle" {
-			c.Record[job.JobID] = workerID
-			c.Status[job.JobID] = "inprogress"
-
-			reply.FileName = job.FileName
-			reply.JobID = job.JobID
-			reply.Type = c.phase
-
-			return nil
+		if c.Status[job.JobID] == "idle" {
+			return job 
 		}
 	}
+
+	return nil
+}
+
+func (c *Coordinator) reassignFailedTasks() {}
+func (c *Coordinator) allTasksDone() bool   { return true }
+
+func (c *Coordinator) monitor() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		c.mu.Lock()
+		if c.phase == "map" && c.allTasksDone() {
+			c.phase = "reduce"
+		}
+		if c.phase == "reduce" && c.allTasksDone() {
+			c.jobDone = true
+		}
+
+		c.reassignFailedTasks()
+		c.mu.Unlock()
+
+		if c.jobDone {
+			break
+		}
+	}
+}
+
+// GetJob RPC handlers for the worker to call.
+func (c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.jobDone {
+		return nil
+	}
+
+	job := c.getIdleTask()
+
+	if job == nil {
+		reply.State = "wait"
+		return nil
+	}
+
+	workerID := args.WorkerID
+	c.assign(job.JobID, workerID)
+
+	reply.FileName = job.FileName
+	reply.JobID = job.JobID
+	reply.Type = c.phase
+
 	return nil
 }
 
@@ -100,11 +146,11 @@ func (c *Coordinator) ReportJobDone(args *JobCompleteArgs, reply *JobCompleteRep
 }
 
 // RegisterWorker RPC handler for worker registration.
-func(c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
+func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWorkerReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	worker := Worker {
+	worker := Worker{
 		args.WorkerID,
 	}
 
@@ -129,15 +175,16 @@ func (c *Coordinator) server() {
 // Done is called periodically by the client to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	done:= false
+	done := false
 
-	return done 
+	return done
 }
 
 // MakeCoordinator creates a Coordinator.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.Jobs = c.createJobs(files)
+	go c.monitor()
 	c.server()
 	return &c
 }

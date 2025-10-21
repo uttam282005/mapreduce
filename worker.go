@@ -29,8 +29,9 @@ type GetJobArgs struct{
 
 type GetJobReply struct {
 	FileName string
-	JobID   string 
+	JobID    string 
 	Type     string
+	State    string
 }
 
 type JobDoneArgs struct {
