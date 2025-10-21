@@ -5,39 +5,9 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
-	"sync"
 	"time"
 )
 
-type Job struct {
-	JobID     string
-	Type      string
-	FileName  string
-	StartTime int64
-}
-
-type MetaData struct {
-	Nreduce int
-	Nmap    int
-}
-
-type Coordinator struct {
-	mu sync.Mutex
-
-	Jobs    []*Job
-	Workers []*Worker
-	Record  map[string]string
-	Status  map[string]string
-	phase   string
-
-	Nreduce int
-	Nmap    int
-	jobDone bool
-}
-
-// map job
-// file
-// id
 // create jobs from input filess
 func (c *Coordinator) createJobs(files []string) []*Job {
 	var jobs []*Job
@@ -54,18 +24,7 @@ func (c *Coordinator) createJobs(files []string) []*Job {
 	return jobs
 }
 
-type RegisterWorkerArgs struct {
-	WorkerID string
-}
-
-type RegisterWorkerReply struct{}
-
-type JobCompleteArgs struct {
-	JobID string
-}
-
-type JobCompleteReply struct{}
-
+// assign a job to worker
 func (c *Coordinator) assign(job *Job, workerID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -75,6 +34,7 @@ func (c *Coordinator) assign(job *Job, workerID string) {
 	job.StartTime = time.Now().Unix()
 }
 
+// get an idle task
 func (c *Coordinator) getIdleTask() *Job {
 	for _, job := range c.Jobs {
 		if c.Status[job.JobID] == "idle" {
@@ -85,6 +45,7 @@ func (c *Coordinator) getIdleTask() *Job {
 	return nil
 }
 
+// reassign tasks that have failed, here failed means not completed in 10 seconds
 func (c *Coordinator) reassignFailedTasks() {
 	for _, job := range c.Jobs {
 		if c.Status[job.JobID] == "inprogress" {
@@ -95,6 +56,7 @@ func (c *Coordinator) reassignFailedTasks() {
 	}
 }
 
+// check tasks completion
 func (c *Coordinator) allTasksDone() bool {
 	for _, status := range c.Status {
 		if status != "done" {
@@ -105,6 +67,7 @@ func (c *Coordinator) allTasksDone() bool {
 	return true 
 }
 
+// monitor the progress of the jobs
 func (c *Coordinator) monitor() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -127,7 +90,7 @@ func (c *Coordinator) monitor() {
 	}
 }
 
-// GetJob RPC handlers for the worker to call.
+// GetJob RPC handler for the worker get job.
 func (c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -153,6 +116,18 @@ func (c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
 	return nil
 }
 
+// GetMetaData RPC handler for worker to get metadata.
+func (c *Coordinator) GetMetaData(args *GetMetaDataArgs, reply *GetMetaDataReply) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	reply.Nmap = c.Nmap
+	reply.Nreduce = c.Nreduce
+
+	return nil
+}
+
+// ReportJobDone RPC handler for worker to report job completion.
 func (c *Coordinator) ReportJobDone(args *JobCompleteArgs, reply *JobCompleteReply) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

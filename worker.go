@@ -13,33 +13,6 @@ import (
 	"time"
 )
 
-// KeyValue is a type used to hold the key/value pairs
-type KeyValue struct {
-	Key   string
-	Value string
-}
-
-type Worker struct {
-	WorkerID string
-}
-
-type GetJobArgs struct{
-	WorkerID string
-}
-
-type GetJobReply struct {
-	FileName string
-	JobID    string 
-	Type     string
-	State    string
-}
-
-type JobDoneArgs struct {
-	JobID string 
-}
-
-type JobDoneReply struct{}
-
 // use ihash(key) % Nreduce to choose the reduce
 func ihash(key string) int {
 	h := fnv.New32a()
@@ -51,14 +24,15 @@ func MakeWorker() (*Worker ,error) {
 	worker := Worker{}
 	id := fmt.Sprintf("%d-%d-%d", time.Now().UnixNano(), os.Getpid(), rand.IntN(1e6))
 	worker.WorkerID = id
-	err := worker.Register()
+	err := worker.register()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create worker: %v", worker.WorkerID)
 	}
 	return &worker, nil
 }
 
-func (w *Worker) Register() error {
+// Register the worker with the coordinator
+func (w *Worker) register() error {
 	args := RegisterWorkerArgs{w.WorkerID}
 	reply := RegisterWorkerReply{}
 	ok := call("Coordinator.RegisterWorker", &args, &reply)
@@ -191,13 +165,14 @@ func handleReduceJob(
 	return true
 }
 
-type GetMetaDataArgs struct {
-
-}
-
-type GetMetaDataReply struct {
-	Nreduce int
-	Nmap int
+func (w *Worker) getMetaData() (MetaData, error) {
+	metaData := GetMetaDataReply{}
+	ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
+	if !ok {
+		log.Fatal("Worker: failed to get metadata from coordinator")
+		return MetaData(metaData), fmt.Errorf("failed to get metadata")
+	}
+	return MetaData(metaData), nil
 }
 
 // StartWorker main loop
@@ -205,16 +180,10 @@ func(w *Worker) StartWorker(
 	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
 ) {
+	MakeWorker()
 
-	workerID := fmt.Sprintf("%d-%d-%d", time.Now().UnixNano(), os.Getpid(), rand.IntN(1e6))
-
-	if !call("Coordinator.RegisterWorker", &RegisterWorkerArgs{workerID}, &RegisterWorkerReply{}) {
-		log.Fatalf("failed to register worker %v", workerID)
-	}
-
-	metaData := GetMetaDataReply{}
-	ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
-	if !ok {
+	metaData, err := w.getMetaData()
+	if err != nil {
 		log.Fatal("Worker: failed to get metadata from coordinator")
 		return
 	}
