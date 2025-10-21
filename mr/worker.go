@@ -35,15 +35,13 @@ func MakeWorker() (*Worker, error) {
 func (w *Worker) register() error {
 	args := RegisterWorkerArgs{w.WorkerID}
 	reply := RegisterWorkerReply{}
-	backoff := 200 * time.Millisecond
-	for i := 0; i < 8; i++ {
-		if call("Coordinator.RegisterWorker", &args, &reply) {
-			log.Printf("worker registered: %s", w.WorkerID)
-			return nil
-		}
-		time.Sleep(backoff)
+	ok := call("Coordinator.RegisterWorker", &args, &reply)
+	if !ok {
+		log.Printf("failed to register worker %v", w.WorkerID)
+		return fmt.Errorf("register failed")
 	}
-	return fmt.Errorf("register failed for worker %s", w.WorkerID)
+	log.Printf("worker registered: %s", w.WorkerID)
+	return nil
 }
 
 // Hanldle the map job
@@ -53,33 +51,27 @@ func handleMapJob(
 	mapTaskID string,
 	nReduce int,
 ) bool {
-	log.Printf("map task %s: processing file %s", mapTaskID, fileName)
 	inputFile, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot read %v", fileName)
 	}
+	defer inputFile.Close()
 
 	content, err := io.ReadAll(inputFile)
 	if err != nil {
-		inputFile.Close()
 		log.Fatalf("cannot read %v", fileName)
 	}
-	inputFile.Close()
 
 	mapgoResult := mapf(fileName, string(content))
 
 	// create encoders and files for each reduce partition
 	enc := make([]*json.Encoder, nReduce)
 	files := make([]*os.File, nReduce)
-
-	for r := range nReduce {
+	for r := 0; r < nReduce; r++ {
 		intermediateFile := fmt.Sprintf("mr-%v-%d", mapTaskID, r)
 		f, err := os.Create(intermediateFile)
 		if err != nil {
-			log.Printf("cannot create intermediate file %v", intermediateFile)
-			files[r] = nil
-			enc[r] = nil
-			continue
+			log.Fatalf("cannot create intermediate file %v", intermediateFile)
 		}
 		files[r] = f
 		enc[r] = json.NewEncoder(f)
@@ -87,13 +79,9 @@ func handleMapJob(
 
 	for _, kv := range mapgoResult {
 		reduceTaskID := ihash(kv.Key) % nReduce
-		if enc[reduceTaskID] == nil {
-			continue
-		}
 		err := enc[reduceTaskID].Encode(&kv)
 		if err != nil {
-			log.Printf("cannot encode map result")
-			continue
+			log.Fatal("cannot encode map result")
 		}
 	}
 
@@ -136,7 +124,6 @@ func handleReduceJob(
 	// Intermediate files are named mr-<mapTaskID>-<reduceID>
 	// we glob across mapTaskIDs as strings
 	for m := range nMap {
-		// try both numeric and string mapTaskID formats
 		fileName := fmt.Sprintf("mr-%d-%v", m, reduceTaskID)
 		file, err := os.Open(fileName)
 		if err != nil {
@@ -159,7 +146,12 @@ func handleReduceJob(
 		return kva[i].Key < kva[j].Key
 	})
 
-	outputFileName := fmt.Sprintf("mr-out-%v", reduceTaskID)
+	outputDir := "output"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatalf("cannot create output directory %v", outputDir)
+	}
+
+	outputFileName := fmt.Sprintf("%s/mr-out-%v", outputDir, reduceTaskID)
 	tempFileName := fmt.Sprintf("%s.tmp", outputFileName)
 	outputFile, err := os.Create(tempFileName)
 	if err != nil {
@@ -192,7 +184,7 @@ func handleReduceJob(
 
 func (w *Worker) getMetaData() (*MetaData, error) {
 	var metaData GetMetaDataReply
-	// retry until coordinator responds
+	// retry until coordinator responds (short backoff)
 	for i := 0; i < 10; i++ {
 		ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
 		if ok {
@@ -222,7 +214,6 @@ func (w *Worker) StartWorker(
 		args := GetJobArgs{
 			WorkerID: w.WorkerID,
 		}
-
 		reply := GetJobReply{}
 
 		if !call("Coordinator.GetJob", &args, &reply) {
@@ -236,11 +227,10 @@ func (w *Worker) StartWorker(
 		// Check if there’s actually a job
 		if reply.State == "exit" {
 			log.Println("Worker: no more jobs, exiting")
-			os.Exit(1)
+			break
 		}
 
 		if reply.State == "wait" {
-			log.Printf("No jobs sleeping...")
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
@@ -262,14 +252,12 @@ func (w *Worker) StartWorker(
 func call(rpcname string, args any, reply any) bool {
 	c, err := rpc.Dial("tcp", "localhost:1234")
 	if err != nil {
-		log.Printf("rpc.Dial error: %v", err)
-		return false
+		log.Fatal("failed to connect  to the coordinator.")
 	}
+
 	defer c.Close()
 
-	if err := c.Call(rpcname, args, reply); err != nil {
-		log.Printf("rpc.Call %s error: %v", rpcname, err)
-		return false
-	}
-	return true
+	err = c.Call(rpcname, args, reply)
+
+	return err == nil
 }
