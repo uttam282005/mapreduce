@@ -95,7 +95,6 @@ func handleMapJob(
 	log.Printf("map task %s: wrote %d partition files", mapTaskID, nReduce)
 	return true
 }
-
 // Notify the coordinator that the job is done
 func notifyCoordinatorDone(JobID string) {
 	for {
@@ -123,22 +122,28 @@ func handleReduceJob(
 	// Read all intermediate files that match the reduce id
 	// Intermediate files are named mr-<mapTaskID>-<reduceID>
 	// we glob across mapTaskIDs as strings
-	for m := range nMap {
-		fileName := fmt.Sprintf("mr-%d-%v", m, reduceTaskID)
-		file, err := os.Open(fileName)
-		if err != nil {
-			continue
+	for m := 0; m < nMap; m++ {
+		// try both numeric and string mapTaskID formats
+		patterns := []string{
+			fmt.Sprintf("mr-%d-%v", m, reduceTaskID),
+			fmt.Sprintf("mr-%v-%v", m, reduceTaskID),
 		}
-
-		dec := json.NewDecoder(file)
-		for {
-			var kv KeyValue
-			if err := dec.Decode(&kv); err != nil {
-				break
+		for _, fileName := range patterns {
+			file, err := os.Open(fileName)
+			if err != nil {
+				continue
 			}
-			kva = append(kva, kv)
+
+			dec := json.NewDecoder(file)
+			for {
+				var kv KeyValue
+				if err := dec.Decode(&kv); err != nil {
+					break
+				}
+				kva = append(kva, kv)
+			}
+			file.Close()
 		}
-		file.Close()
 	}
 
 	// Group by keys
@@ -146,12 +151,7 @@ func handleReduceJob(
 		return kva[i].Key < kva[j].Key
 	})
 
-	outputDir := "output"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		log.Fatalf("cannot create output directory %v", outputDir)
-	}
-
-	outputFileName := fmt.Sprintf("%s/mr-out-%v", outputDir, reduceTaskID)
+	outputFileName := fmt.Sprintf("mr-out-%v", reduceTaskID)
 	tempFileName := fmt.Sprintf("%s.tmp", outputFileName)
 	outputFile, err := os.Create(tempFileName)
 	if err != nil {

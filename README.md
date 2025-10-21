@@ -1,7 +1,8 @@
 ##  MapReduce in Go
 
-This project is a **simplified MapReduce framework** implemented in Go — inspired by the [MIT 6.824 Distributed Systems](https://pdos.csail.mit.edu/6.824/) course.
-It demonstrates how distributed computation can be performed by splitting work into **Map** and **Reduce** phases coordinated by a central **Coordinator** process and executed by multiple **Worker** processes.
+This project is a **simplified MapReduce framework** implemented in Go, inspired by the classic
+[MapReduce: Simplified Data Processing on Large Clusters (Google)](https://research.google/pubs/pub62/) paper.
+It showcases how large-scale distributed computation can be achieved by dividing tasks into **Map** and **Reduce** phases, coordinated by a central **Coordinator** and executed by multiple parallel **Worker** processes.
 
 ---
 
