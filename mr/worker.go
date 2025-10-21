@@ -1,12 +1,12 @@
 package mr
 
 import (
-	"math/rand/v2"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
+	"math/rand/v2"
 	"net/rpc"
 	"os"
 	"sort"
@@ -20,7 +20,7 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func MakeWorker() (*Worker ,error) {
+func MakeWorker() (*Worker, error) {
 	worker := Worker{}
 	id := fmt.Sprintf("%d-%d-%d", time.Now().UnixNano(), os.Getpid(), rand.IntN(1e6))
 	worker.WorkerID = id
@@ -35,12 +35,15 @@ func MakeWorker() (*Worker ,error) {
 func (w *Worker) register() error {
 	args := RegisterWorkerArgs{w.WorkerID}
 	reply := RegisterWorkerReply{}
-	ok := call("Coordinator.RegisterWorker", &args, &reply)
-	if !ok {
-		log.Fatalf("failed to register worker %v", w.WorkerID)
-		return fmt.Errorf("")
+	backoff := 200 * time.Millisecond
+	for i := 0; i < 8; i++ {
+		if call("Coordinator.RegisterWorker", &args, &reply) {
+			log.Printf("worker registered: %s", w.WorkerID)
+			return nil
+		}
+		time.Sleep(backoff)
 	}
-	return nil
+	return fmt.Errorf("register failed for worker %s", w.WorkerID)
 }
 
 // Hanldle the map job
@@ -50,39 +53,58 @@ func handleMapJob(
 	mapTaskID string,
 	nReduce int,
 ) bool {
+	log.Printf("map task %s: processing file %s", mapTaskID, fileName)
 	inputFile, err := os.Open(fileName)
 	if err != nil {
 		log.Fatalf("cannot read %v", fileName)
 	}
-	defer inputFile.Close()
 
 	content, err := io.ReadAll(inputFile)
 	if err != nil {
+		inputFile.Close()
 		log.Fatalf("cannot read %v", fileName)
 	}
+	inputFile.Close()
 
 	mapgoResult := mapf(fileName, string(content))
 
+	// create encoders and files for each reduce partition
 	enc := make([]*json.Encoder, nReduce)
+	files := make([]*os.File, nReduce)
 
 	for r := range nReduce {
 		intermediateFile := fmt.Sprintf("mr-%v-%d", mapTaskID, r)
 		f, err := os.Create(intermediateFile)
 		if err != nil {
-			log.Fatalf("cannot create intermediate file %v", intermediateFile)
+			log.Printf("cannot create intermediate file %v", intermediateFile)
+			files[r] = nil
+			enc[r] = nil
+			continue
 		}
-		defer f.Close()
+		files[r] = f
 		enc[r] = json.NewEncoder(f)
 	}
 
 	for _, kv := range mapgoResult {
 		reduceTaskID := ihash(kv.Key) % nReduce
+		if enc[reduceTaskID] == nil {
+			continue
+		}
 		err := enc[reduceTaskID].Encode(&kv)
 		if err != nil {
-			log.Fatal("cannot encode map result")
+			log.Printf("cannot encode map result")
+			continue
 		}
 	}
 
+	// close all files explicitly
+	for _, f := range files {
+		if f != nil {
+			f.Close()
+		}
+	}
+
+	log.Printf("map task %s: wrote %d partition files", mapTaskID, nReduce)
 	return true
 }
 
@@ -110,8 +132,11 @@ func handleReduceJob(
 ) bool {
 	kva := []KeyValue{}
 
-	// Read all intermediate files
+	// Read all intermediate files that match the reduce id
+	// Intermediate files are named mr-<mapTaskID>-<reduceID>
+	// we glob across mapTaskIDs as strings
 	for m := range nMap {
+		// try both numeric and string mapTaskID formats
 		fileName := fmt.Sprintf("mr-%d-%v", m, reduceTaskID)
 		file, err := os.Open(fileName)
 		if err != nil {
@@ -165,23 +190,25 @@ func handleReduceJob(
 	return true
 }
 
-func (w *Worker) getMetaData() (MetaData, error) {
-	metaData := GetMetaDataReply{}
-	ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
-	if !ok {
-		log.Fatal("Worker: failed to get metadata from coordinator")
-		return MetaData(metaData), fmt.Errorf("failed to get metadata")
+func (w *Worker) getMetaData() (*MetaData, error) {
+	var metaData GetMetaDataReply
+	// retry until coordinator responds
+	for i := 0; i < 10; i++ {
+		ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
+		if ok {
+			log.Printf("worker: got metadata Nmap=%d Nreduce=%d", metaData.Nmap, metaData.Nreduce)
+			return &MetaData{metaData.Nmap, metaData.Nreduce}, nil
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
-	return MetaData(metaData), nil
+	return nil, fmt.Errorf("failed to get metadata after retries")
 }
 
 // StartWorker main loop
-func(w *Worker) StartWorker(
+func (w *Worker) StartWorker(
 	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
 ) {
-	MakeWorker()
-
 	metaData, err := w.getMetaData()
 	if err != nil {
 		log.Fatal("Worker: failed to get metadata from coordinator")
@@ -192,7 +219,10 @@ func(w *Worker) StartWorker(
 	Nmap := metaData.Nmap
 
 	for {
-		args := GetJobArgs{}
+		args := GetJobArgs{
+			WorkerID: w.WorkerID,
+		}
+
 		reply := GetJobReply{}
 
 		if !call("Coordinator.GetJob", &args, &reply) {
@@ -201,10 +231,18 @@ func(w *Worker) StartWorker(
 			continue
 		}
 
+		log.Printf("worker %s: got job reply: %+v", w.WorkerID, reply)
+
 		// Check if there’s actually a job
-		if reply.FileName == "" {
+		if reply.State == "exit" {
 			log.Println("Worker: no more jobs, exiting")
-			break
+			os.Exit(1)
+		}
+
+		if reply.State == "wait" {
+			log.Printf("No jobs sleeping...")
+			time.Sleep(500 * time.Millisecond)
+			continue
 		}
 
 		switch reply.Type {
@@ -224,12 +262,14 @@ func(w *Worker) StartWorker(
 func call(rpcname string, args any, reply any) bool {
 	c, err := rpc.Dial("tcp", "localhost:1234")
 	if err != nil {
-		log.Fatal("failed to connect  to the coordinator.")
+		log.Printf("rpc.Dial error: %v", err)
+		return false
 	}
-
 	defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-
-	return err == nil
+	if err := c.Call(rpcname, args, reply); err != nil {
+		log.Printf("rpc.Call %s error: %v", rpcname, err)
+		return false
+	}
+	return true
 }

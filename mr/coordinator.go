@@ -13,7 +13,7 @@ func (c *Coordinator) createJobs(files []string) []*Job {
 	var jobs []*Job
 	for i, file := range files {
 		job := Job{
-			fmt.Sprintf("job-%d", i),
+			fmt.Sprintf("%d", i),
 			c.phase,
 			file,
 			-1,
@@ -24,32 +24,11 @@ func (c *Coordinator) createJobs(files []string) []*Job {
 	return jobs
 }
 
-// assign a job to worker
-func (c *Coordinator) assign(job *Job, workerID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.Record[job.JobID] = workerID
-	c.Status[job.JobID] = "inprogress"
-	job.StartTime = time.Now().Unix()
-}
-
-// get an idle task
-func (c *Coordinator) getIdleTask() *Job {
-	for _, job := range c.Jobs {
-		if c.Status[job.JobID] == "idle" {
-			return job 
-		}
-	}
-
-	return nil
-}
-
 // reassign tasks that have failed, here failed means not completed in 10 seconds
 func (c *Coordinator) reassignFailedTasks() {
 	for _, job := range c.Jobs {
 		if c.Status[job.JobID] == "inprogress" {
-			if time.Now().Unix() - job.StartTime > 10 {
+			if time.Now().Unix()-job.StartTime > 10 {
 				c.Status[job.JobID] = "idle"
 			}
 		}
@@ -64,7 +43,7 @@ func (c *Coordinator) allTasksDone() bool {
 		}
 	}
 
-	return true 
+	return true
 }
 
 // monitor the progress of the jobs
@@ -76,7 +55,16 @@ func (c *Coordinator) monitor() {
 		c.mu.Lock()
 		if c.phase == "map" && c.allTasksDone() {
 			c.phase = "reduce"
+			// create reduce jobs
+			var rjobs []*Job
+			for i := 0; i < c.Nreduce; i++ {
+				job := Job{fmt.Sprintf("%d", i), "reduce", "", -1}
+				rjobs = append(rjobs, &job)
+				c.Status[job.JobID] = "idle"
+			}
+			c.Jobs = rjobs
 		}
+
 		if c.phase == "reduce" && c.allTasksDone() {
 			c.jobDone = true
 		}
@@ -96,25 +84,28 @@ func (c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
 	defer c.mu.Unlock()
 
 	if c.jobDone {
+		reply.State = "exit"
 		return nil
 	}
 
-	job := c.getIdleTask()
+	for _, job := range c.Jobs {
+		if c.Status[job.JobID] == "idle" {
+			c.Status[job.JobID] = "inprogress"
+			c.Record[job.JobID] = args.WorkerID
+			job.StartTime = time.Now().Unix()
 
-	if job == nil {
-		reply.State = "wait"
-		return nil
+			reply.FileName = job.FileName
+			reply.JobID = job.JobID
+			reply.Type = c.phase
+			reply.State = "assigned"
+			return nil
+		}
 	}
 
-	workerID := args.WorkerID
-	c.assign(job, workerID)
-
-	reply.FileName = job.FileName
-	reply.JobID = job.JobID
-	reply.Type = c.phase
-
+	reply.State = "wait"
 	return nil
 }
+
 
 // GetMetaData RPC handler for worker to get metadata.
 func (c *Coordinator) GetMetaData(args *GetMetaDataArgs, reply *GetMetaDataReply) error {
@@ -128,12 +119,13 @@ func (c *Coordinator) GetMetaData(args *GetMetaDataArgs, reply *GetMetaDataReply
 }
 
 // ReportJobDone RPC handler for worker to report job completion.
-func (c *Coordinator) ReportJobDone(args *JobDoneArgs, reply *JobDoneReply) {
+func (c *Coordinator) ReportJobDone(args *JobDoneArgs, reply *JobDoneReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	delete(c.Record, args.JobID)
 	c.Status[args.JobID] = "done"
+	return nil
 }
 
 // RegisterWorker RPC handler for worker registration.
@@ -151,7 +143,7 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
-  rpc.Register(c) // Register the Coordinator service
+	rpc.Register(c) // Register the Coordinator service
 
 	listener, err := net.Listen("tcp", ":1234") // Listen on port 1234
 	if err != nil {
@@ -184,17 +176,21 @@ func (c *Coordinator) Done() bool {
 // MakeCoordinator creates a Coordinator.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		Nmap: 	len(files),
-	  Status: make(map[string]string),
-		Record: make(map[string]string),
-		phase:  "map",
+		Nmap:    len(files),
+		Status:  make(map[string]string),
+		Record:  make(map[string]string),
+		phase:   "map",
 		Nreduce: nReduce,
 
 		jobDone: false,
 	}
 
 	c.Jobs = c.createJobs(files)
+	// populate initial status for map jobs
+	for _, job := range c.Jobs {
+		c.Status[job.JobID] = "idle"
+	}
 	go c.monitor()
-	c.server()
+	go c.server()
 	return &c
 }
