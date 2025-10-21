@@ -35,12 +35,12 @@ type GetJobReply struct {
 }
 
 type JobDoneArgs struct {
-	JobID int
+	JobID string 
 }
 
 type JobDoneReply struct{}
 
-// use ihash(key) % NReduce to choose the reduce
+// use ihash(key) % Nreduce to choose the reduce
 func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -66,6 +66,7 @@ func (w *Worker) Register() error {
 		log.Fatalf("failed to register worker %v", w.WorkerID)
 		return fmt.Errorf("")
 	}
+	return nil
 }
 
 // Hanldle the map job
@@ -129,7 +130,7 @@ func notifyCoordinatorDone(JobID string) {
 
 // Handle the reduce job
 func handleReduceJob(
-	reduceTaskID int,
+	reduceTaskID string,
 	reducef func(string, []string) string,
 	nMap int,
 ) bool {
@@ -137,7 +138,7 @@ func handleReduceJob(
 
 	// Read all intermediate files
 	for m := range nMap {
-		fileName := fmt.Sprintf("mr-%d-%d", m, reduceTaskID)
+		fileName := fmt.Sprintf("mr-%d-%v", m, reduceTaskID)
 		file, err := os.Open(fileName)
 		if err != nil {
 			continue
@@ -159,7 +160,7 @@ func handleReduceJob(
 		return kva[i].Key < kva[j].Key
 	})
 
-	outputFileName := fmt.Sprintf("mr-out-%d", reduceTaskID)
+	outputFileName := fmt.Sprintf("mr-out-%v", reduceTaskID)
 	tempFileName := fmt.Sprintf("%s.tmp", outputFileName)
 	outputFile, err := os.Create(tempFileName)
 	if err != nil {
@@ -190,11 +191,37 @@ func handleReduceJob(
 	return true
 }
 
-// Worker main loop
-func startWorker(
+type GetMetaDataArgs struct {
+
+}
+
+type GetMetaDataReply struct {
+	Nreduce int
+	Nmap int
+}
+
+// StartWorker main loop
+func(w *Worker) StartWorker(
 	mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string,
 ) {
+
+	workerID := fmt.Sprintf("%d-%d-%d", time.Now().UnixNano(), os.Getpid(), rand.IntN(1e6))
+
+	if !call("Coordinator.RegisterWorker", &RegisterWorkerArgs{workerID}, &RegisterWorkerReply{}) {
+		log.Fatalf("failed to register worker %v", workerID)
+	}
+
+	metaData := GetMetaDataReply{}
+	ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
+	if !ok {
+		log.Fatal("Worker: failed to get metadata from coordinator")
+		return
+	}
+
+	Nreduce := metaData.Nreduce
+	Nmap := metaData.Nmap
+
 	for {
 		args := GetJobArgs{}
 		reply := GetJobReply{}
@@ -213,9 +240,9 @@ func startWorker(
 
 		switch reply.Type {
 		case "map":
-			handleMapJob(reply.FileName, mapf, reply.JobID, reply.NReduce)
+			handleMapJob(reply.FileName, mapf, reply.JobID, Nreduce)
 		case "reduce":
-			handleReduceJob(reply.JobID, reducef, reply.NReduce)
+			handleReduceJob(reply.JobID, reducef, Nmap)
 		}
 
 		notifyCoordinatorDone(reply.JobID)
@@ -226,19 +253,14 @@ func startWorker(
 
 // Send an RPC request to the coordinator, wait for the response.
 func call(rpcname string, args any, reply any) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
-	sockname := coordinatorSock()
-	c, err := rpc.DialHTTP("unix", sockname)
+	c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	if err != nil {
-		log.Fatal("dialing:", err)
+		log.Fatal("failed to connect  to the coordinator.")
 	}
+
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
 
-	fmt.Println(err)
-	return false
+	return err == nil
 }

@@ -2,11 +2,9 @@
 package mr
 
 import (
-	"log"
+	"fmt"
 	"net"
-	"net/http"
 	"net/rpc"
-	"os"
 	"sync"
 	"time"
 )
@@ -32,7 +30,7 @@ type Coordinator struct {
 	Status  map[string]string
 	phase   string
 
-	NReduce int
+	Nreduce int
 	Nmap    int
 	jobDone bool
 }
@@ -68,12 +66,13 @@ type JobCompleteArgs struct {
 
 type JobCompleteReply struct{}
 
-func (c *Coordinator) assign(jobID, workerID string) {
+func (c *Coordinator) assign(job *Job, workerID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.Record[jobID] = workerID
-	c.Status[jobID] = "inprogress"
+	c.Record[job.JobID] = workerID
+	c.Status[job.JobID] = "inprogress"
+	job.StartTime = time.Now().Unix()
 }
 
 func (c *Coordinator) getIdleTask() *Job {
@@ -86,8 +85,25 @@ func (c *Coordinator) getIdleTask() *Job {
 	return nil
 }
 
-func (c *Coordinator) reassignFailedTasks() {}
-func (c *Coordinator) allTasksDone() bool   { return true }
+func (c *Coordinator) reassignFailedTasks() {
+	for _, job := range c.Jobs {
+		if c.Status[job.JobID] == "inprogress" {
+			if time.Now().Unix() - job.StartTime > 10 {
+				c.Status[job.JobID] = "idle"
+			}
+		}
+	}
+}
+
+func (c *Coordinator) allTasksDone() bool {
+	for _, status := range c.Status {
+		if status != "done" {
+			return false
+		}
+	}
+
+	return true 
+}
 
 func (c *Coordinator) monitor() {
 	ticker := time.NewTicker(time.Second)
@@ -128,7 +144,7 @@ func (c *Coordinator) GetJob(args *GetJobArgs, reply *GetJobReply) error {
 	}
 
 	workerID := args.WorkerID
-	c.assign(job.JobID, workerID)
+	c.assign(job, workerID)
 
 	reply.FileName = job.FileName
 	reply.JobID = job.JobID
@@ -160,29 +176,43 @@ func (c *Coordinator) RegisterWorker(args *RegisterWorkerArgs, reply *RegisterWo
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
-	rpc.Register(c)
-	rpc.HandleHTTP()
-	// l, e := net.Listen("tcp", ":1234")
-	sockname := coordinatorSock()
-	os.Remove(sockname)
-	l, e := net.Listen("unix", sockname)
-	if e != nil {
-		log.Fatal("listen error:", e)
+  rpc.Register(c) // Register the Coordinator service
+
+	listener, err := net.Listen("tcp", ":1234") // Listen on port 1234
+	if err != nil {
+		fmt.Println("Error listening:", err)
+		return
 	}
-	go http.Serve(l, nil)
+	defer listener.Close()
+
+	fmt.Println("RPC server listening on port 1234")
+
+	for {
+		conn, err := listener.Accept() // Accept incoming connections
+		if err != nil {
+			fmt.Println("Error accepting connection:", err)
+			continue
+		}
+		go rpc.ServeConn(conn) // Serve each connection in a goroutine
+	}
 }
 
 // Done is called periodically by the client to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	done := false
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	return done
+	return c.jobDone
 }
 
 // MakeCoordinator creates a Coordinator.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		Nmap: 	len(files),
+		Nreduce: nReduce,
+	}
+
 	c.Jobs = c.createJobs(files)
 	go c.monitor()
 	c.server()
