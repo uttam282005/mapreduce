@@ -71,7 +71,8 @@ func handleMapJob(
 		intermediateFile := fmt.Sprintf("mr-%v-%d", mapTaskID, r)
 		f, err := os.Create(intermediateFile)
 		if err != nil {
-			log.Fatalf("cannot create intermediate file %v", intermediateFile)
+			log.Printf("cannot create intermediate file %v", intermediateFile)
+			continue
 		}
 		files[r] = f
 		enc[r] = json.NewEncoder(f)
@@ -79,9 +80,13 @@ func handleMapJob(
 
 	for _, kv := range mapgoResult {
 		reduceTaskID := ihash(kv.Key) % nReduce
+		if enc[reduceTaskID] == nil {
+			continue
+		}
 		err := enc[reduceTaskID].Encode(&kv)
 		if err != nil {
-			log.Fatal("cannot encode map result")
+			log.Printf("cannot encode map result")
+			continue
 		}
 	}
 
@@ -95,6 +100,7 @@ func handleMapJob(
 	log.Printf("map task %s: wrote %d partition files", mapTaskID, nReduce)
 	return true
 }
+
 // Notify the coordinator that the job is done
 func notifyCoordinatorDone(JobID string) {
 	for {
@@ -120,38 +126,35 @@ func handleReduceJob(
 	kva := []KeyValue{}
 
 	// Read all intermediate files that match the reduce id
-	// Intermediate files are named mr-<mapTaskID>-<reduceID>
-	// we glob across mapTaskIDs as strings
 	for m := 0; m < nMap; m++ {
-		// try both numeric and string mapTaskID formats
-		patterns := []string{
-			fmt.Sprintf("mr-%d-%v", m, reduceTaskID),
-			fmt.Sprintf("mr-%v-%v", m, reduceTaskID),
+		fileName := fmt.Sprintf("mr-%d-%v", m, reduceTaskID)
+		file, err := os.Open(fileName)
+		if err != nil {
+			continue
 		}
-		for _, fileName := range patterns {
-			file, err := os.Open(fileName)
-			if err != nil {
-				continue
-			}
 
-			dec := json.NewDecoder(file)
-			for {
-				var kv KeyValue
-				if err := dec.Decode(&kv); err != nil {
-					break
-				}
-				kva = append(kva, kv)
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
 			}
-			file.Close()
+			kva = append(kva, kv)
 		}
+		file.Close()
 	}
 
-	// Group by keys
+	// Sort by key
 	sort.Slice(kva, func(i, j int) bool {
 		return kva[i].Key < kva[j].Key
 	})
 
-	outputFileName := fmt.Sprintf("mr-out-%v", reduceTaskID)
+	// Ensure output directory exists
+	if err := os.MkdirAll("output", 0o755); err != nil {
+		log.Fatalf("cannot create output directory: %v", err)
+	}
+
+	outputFileName := fmt.Sprintf("output/mr-out-%v", reduceTaskID)
 	tempFileName := fmt.Sprintf("%s.tmp", outputFileName)
 	outputFile, err := os.Create(tempFileName)
 	if err != nil {
@@ -159,14 +162,15 @@ func handleReduceJob(
 	}
 	defer outputFile.Close()
 
-	// Aggregreate values for each key and call the reduce func
+	// Aggregate values for each key and call reduce function
 	i := 0
 	for i < len(kva) {
 		j := i + 1
 		for j < len(kva) && kva[j].Key == kva[i].Key {
 			j++
 		}
-		values := []string{}
+
+		values := make([]string, 0, j-i)
 		for k := i; k < j; k++ {
 			values = append(values, kva[k].Value)
 		}
@@ -177,14 +181,16 @@ func handleReduceJob(
 		i = j
 	}
 
-	// To make sure that there are no half written output files
-	os.Rename(tempFileName, outputFileName)
+	// Atomically replace final output
+	if err := os.Rename(tempFileName, outputFileName); err != nil {
+		log.Fatalf("cannot rename temp output file: %v", err)
+	}
+
 	return true
 }
 
 func (w *Worker) getMetaData() (*MetaData, error) {
 	var metaData GetMetaDataReply
-	// retry until coordinator responds (short backoff)
 	for i := 0; i < 10; i++ {
 		ok := call("Coordinator.GetMetaData", &GetMetaDataArgs{}, &metaData)
 		if ok {
